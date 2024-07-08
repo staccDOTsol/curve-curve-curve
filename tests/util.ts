@@ -10,7 +10,7 @@ import {
 } from "@solana/web3.js";
 import { CurveLaunchpad } from "../target/types/curve_launchpad";
 import * as client from "../client/";
-import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { TOKEN_2022_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
 
 
 type EventKeys = keyof anchor.IdlEvents<CurveLaunchpad>;
@@ -194,7 +194,7 @@ export const getSPLBalance = async (
   allowOffCurve: boolean = false
 ) => {
   try {
-    let ata = getAssociatedTokenAddressSync(mintAddress, pubKey, allowOffCurve);
+    let ata = getAssociatedTokenAddressSync(mintAddress, pubKey, allowOffCurve, TOKEN_2022_PROGRAM_ID);
     const balance = await connection.getTokenAccountBalance(ata, "processed");
     return balance.value.amount;
   } catch (e) {

@@ -1,5 +1,5 @@
 use crate::{
-    amm, calculate_fee, state::{BondingCurve, Global}, CurveLaunchpadError, TradeEvent
+    amm, calculate_fee, check_buy_sell, state::{UserTransferData, BondingCurve, Global}, CurveLaunchpadError, TradeEvent
 };
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self as token, Mint, TokenInterface, TokenAccount, TransferChecked};
@@ -20,36 +20,52 @@ pub struct Sell<'info> {
     #[account(mut)]
     fee_recipient: AccountInfo<'info>,
 
-    mint: InterfaceAccount<'info, Mint>,
+    mint: Box<InterfaceAccount<'info, Mint>>,
 
     #[account(
         mut,
-        seeds = [BondingCurve::SEED_PREFIX, mint.to_account_info().key.as_ref()],
+        seeds = [BondingCurve::SEED_PREFIX, bonding_curve.creator.as_ref()],
         bump,
     )]
     bonding_curve: Box<Account<'info, BondingCurve>>,
 
     #[account(
-        mut,
-        associated_token::mint = mint,
-        associated_token::authority = bonding_curve,
+        mut,        address = bonding_curve.token_account,
+
     )]
     bonding_curve_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(
         mut,
-        associated_token::mint = mint,
-        associated_token::authority = user,
+      //  associated_token::mint = mint,
+      //  associated_token::authority = user,
     )]
     user_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     system_program: Program<'info, System>,
 
     token_program: Interface<'info, TokenInterface>,
+
+    #[account(
+        init_if_needed,
+        payer = user,
+        space = 8 + UserTransferData::INIT_SPACE,
+        seeds = [b"user", user.key().as_ref(), mint.key().as_ref()],
+        bump
+    )]
+    pub user_transfer_data: Account<'info, UserTransferData>,
 }
 
 pub fn sell(ctx: Context<Sell>, token_amount: u64, min_sol_output: u64) -> Result<()> {
     //check if bonding curve is complete
+    // Check if the user is authorized to sell
+    check_buy_sell(
+        &mut ctx.accounts.user_transfer_data,
+        ctx.accounts.user.to_account_info(),
+        ctx.accounts.system_program.to_account_info(),
+        *ctx.accounts.bonding_curve.clone(),
+        token_amount,
+    )?;
     require!(
         !ctx.accounts.bonding_curve.complete,
         CurveLaunchpadError::BondingCurveComplete,

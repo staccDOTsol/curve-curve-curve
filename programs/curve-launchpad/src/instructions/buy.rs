@@ -1,55 +1,184 @@
 use anchor_lang::{prelude::*, solana_program::system_instruction};
-use anchor_spl::token_interface::{self as token, Mint, TokenInterface, TokenAccount, TransferChecked};
-
+use anchor_spl::{associated_token::AssociatedToken, memo::Memo, token_interface::{self as token, Mint, TokenAccount, TokenInterface, TransferChecked}};
+use whirlpool::state::{FeeTier, Position, TickArray, Whirlpool, WhirlpoolsConfig};
+use std::str::FromStr;
 use crate::{
-    amm, calculate_fee, state::{BondingCurve, Global}, CompleteEvent, CurveLaunchpadError, TradeEvent
+    amm, calculate_fee, check_buy_sell, state::{BondingCurve, Global, LastWithdraw, UserTransferData}, CompleteEvent, CurveLaunchpadError, TradeEvent
 };
 
 #[event_cpi]
 #[derive(Accounts)]
+#[instruction(start_tick_index: i32)]
+
+
 pub struct Buy<'info> {
     #[account(mut)]
-    user: Signer<'info>,
+   pub user: Signer<'info>,
 
     #[account(
         seeds = [Global::SEED_PREFIX],
         bump,
     )]
-    global: Box<Account<'info, Global>>,
+   pub global: Box<Account<'info, Global>>,
 
     /// CHECK: Using global state to validate fee_recipient account
     #[account(mut)]
-    fee_recipient: AccountInfo<'info>,
+    pub fee_recipient: AccountInfo<'info>,
 
-    mint: InterfaceAccount<'info, Mint>,
+   pub mint: Box<InterfaceAccount<'info, Mint>>,
 
     #[account(
         mut,
-        seeds = [BondingCurve::SEED_PREFIX, mint.to_account_info().key.as_ref()],
+        seeds = [BondingCurve::SEED_PREFIX, bonding_curve.creator.as_ref()],
         bump,
     )]
-    bonding_curve: Box<Account<'info, BondingCurve>>,
+    pub bonding_curve: Box<Account<'info, BondingCurve>>,
 
     #[account(
         mut,
-        associated_token::mint = mint,
-        associated_token::authority = bonding_curve,
+        address = bonding_curve.token_account,
     )]
-    bonding_curve_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub bonding_curve_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(
         mut,
-        associated_token::mint = mint,
-        associated_token::authority = user,
+     //   associated_token::mint = mint,
+     //   associated_token::authority = user,
     )]
-    user_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub user_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    system_program: Program<'info, System>,
+    pub system_program: Program<'info, System>,
 
-    token_program: Interface<'info, TokenInterface>,
+    pub token_program: Interface<'info, TokenInterface>,
+
+    #[account(
+        init_if_needed,
+        payer = user,
+        space = 8 + UserTransferData::INIT_SPACE,
+        seeds = [b"user", user.key().as_ref(), mint.key().as_ref()],
+        bump
+    )]
+    pub user_transfer_data: Box<Account<'info, UserTransferData>>,
+
+    #[account(
+        init_if_needed,
+        space = 8 + LastWithdraw::INIT_SPACE,
+        seeds = [LastWithdraw::SEED_PREFIX],
+        bump,
+        payer = user,
+    )]
+    pub last_withdraw: Box<Account<'info, LastWithdraw>>,
+    #[account(address = Pubkey::from_str("J5T5RStZBW2ayuTp5dGCQMHsUApCReRbytDMRd4ZP2aR").unwrap())]
+    pub whirlpools_config: Box<Account<'info, WhirlpoolsConfig>>,
+
+    pub token_mint_a: Box<InterfaceAccount<'info, Mint>>,
+    pub token_mint_b: Box<InterfaceAccount<'info, Mint>>,
+
+    #[account(seeds = [b"token_badge", whirlpools_config.key().as_ref(), token_mint_a.key().as_ref()], bump)]
+    /// CHECK: checked in the handler
+    pub token_badge_a: UncheckedAccount<'info>,
+    #[account(seeds = [b"token_badge", whirlpools_config.key().as_ref(), token_mint_b.key().as_ref()], bump)]
+    /// CHECK: checked in the handler
+    pub token_badge_b: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub funder: Signer<'info>,
+
+    #[account(init,
+      seeds = [
+        b"whirlpool".as_ref(),
+        whirlpools_config.key().as_ref(),
+        token_mint_a.key().as_ref(),
+        token_mint_b.key().as_ref(),
+        256_u16.to_le_bytes().as_ref()
+      ],
+      bump,
+      payer = funder,
+      space = Whirlpool::LEN)]
+    pub whirlpool: Box<Account<'info, Whirlpool>>,
+
+    #[account(init,
+      payer = funder,
+      token::token_program = token_program_a,
+      token::mint = token_mint_a,
+      token::authority = whirlpool)]
+    pub token_vault_a: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(init,
+      payer = funder,
+      token::token_program = token_program_b,
+      token::mint = token_mint_b,
+      token::authority = whirlpool)]
+    pub token_vault_b: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(has_one = whirlpools_config, constraint = fee_tier.tick_spacing == 256_u16)]
+    pub fee_tier: Account<'info, FeeTier>,
+
+    #[account(address = token_mint_a.to_account_info().owner.clone())]
+    pub token_program_a: Interface<'info, TokenInterface>,
+    #[account(address = token_mint_b.to_account_info().owner.clone())]
+    pub token_program_b: Interface<'info, TokenInterface>,
+    pub rent: Sysvar<'info, Rent>,
+
+    #[account(
+      init,
+      payer = funder,
+      seeds = [b"tick_array", whirlpool.key().as_ref(), start_tick_index.to_string().as_bytes()],
+      bump,
+      space = TickArray::LEN)]
+    pub tick_array: AccountLoader<'info, TickArray>,
+
+    /// CHECK: safe, the account that will be the owner of the position can be arbitrary
+    pub owner: UncheckedAccount<'info>,
+
+    #[account(init,
+      payer = funder,
+      space = Position::LEN,
+      seeds = [b"position".as_ref(), position_mint.key().as_ref()],
+      bump,
+    )]
+    pub position: Box<Account<'info, Position>>,
+
+    #[account(init,
+        payer = funder,
+        mint::authority = whirlpool,
+        mint::decimals = 0,
+    )]
+    pub position_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    #[account(init,
+      payer = funder,
+      associated_token::mint = position_mint,
+      associated_token::authority = owner,
+    )]
+    pub position_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+
+    pub associated_token_program: Program<'info, AssociatedToken>,
+
+    pub memo_program: Program<'info, Memo>,
+
+    pub position_authority: Signer<'info>,
+
+    #[account(mut, constraint = token_owner_account_a.mint == whirlpool.token_mint_a)]
+    pub token_owner_account_a: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(mut, constraint = token_owner_account_b.mint == whirlpool.token_mint_b)]
+    pub token_owner_account_b: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(mut, has_one = whirlpool)]
+    pub tick_array_lower: AccountLoader<'info, TickArray>,
+    #[account(mut, has_one = whirlpool)]
+    pub tick_array_upper: AccountLoader<'info, TickArray>,
 }
 
 pub fn buy(ctx: Context<Buy>, token_amount: u64, max_sol_cost: u64) -> Result<()> {
+    check_buy_sell(
+        &mut ctx.accounts.user_transfer_data,
+        ctx.accounts.user.to_account_info(),
+        ctx.accounts.system_program.to_account_info(),
+        *ctx.accounts.bonding_curve.clone(),
+        token_amount,
+    )?;
     require!(
         ctx.accounts.global.initialized,
         CurveLaunchpadError::NotInitialized
@@ -158,7 +287,7 @@ pub fn buy(ctx: Context<Buy>, token_amount: u64, max_sol_cost: u64) -> Result<()
 
     let signer: [&[&[u8]]; 1] = [&[
         BondingCurve::SEED_PREFIX,
-        ctx.accounts.mint.to_account_info().key.as_ref(),
+        ctx.accounts.bonding_curve.creator.as_ref(),
         &[ctx.bumps.bonding_curve],
     ]];
 
